@@ -1,5 +1,5 @@
-# aml
-another ml dialect. just something I want to make in future.
+# lazyml
+lazy ml dialect. just something I want to make in future.
 
 ## Features
 - lazy instead of eager
