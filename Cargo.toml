@@ -1,0 +1,12 @@
+[package]
+name = "fnc"
+version = "0.1.0"
+edition = "2021"
+
+[build-dependencies] # <-- We added this and everything after!
+lalrpop = "0.20.0"
+
+[dependencies]
+regex = "1"
+lalrpop-util = {version = "0.20.0", features = ["lexer", "regex"]}
+

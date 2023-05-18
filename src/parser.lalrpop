@@ -1,0 +1,140 @@
+use crate::ast::{ArithOp, CmpOp, Expr, Func, Program};
+
+grammar;
+
+pub Program: Program = {
+    <f:Fn> ";;" <p:Program> => {
+        let mut p = p;
+        p.push(f);
+        p
+    },
+    <f:Fn> ";;" => vec![f],
+};
+
+Fn: Func = {
+    <i:Id> "(" <p:Params> ")" "->" <e:Expr> => Func {
+        name: i,
+        args: p,
+        body: e,
+    },
+    <i:Id> "(" ")" "->" <e:Expr> => Func {
+        name: i,
+        body: e,
+        args: vec![],
+    },
+};
+
+Exprs : Vec<Expr> = {
+    <e:Expr> ";" <es:Exprs> => {
+        let mut es = es;
+        es.push(e);
+        es
+    },
+    <e:Expr> => vec![e],
+};
+
+Expr = {
+    <Object>,
+    <Tuple>,
+    <Aexp>,
+    <IfElse>,
+    <In>,
+};
+
+Aexp : Expr = {
+    <l:Aexp> "==" <r:Factor> => Expr::CmpOp(Box::new(l), CmpOp::Eq, Box::new(r)),
+    <l:Aexp> "!=" <r:Factor> => Expr::CmpOp(Box::new(l), CmpOp::Ne, Box::new(r)),
+    <l:Aexp> "<" <r:Factor> => Expr::CmpOp(Box::new(l), CmpOp::Lt, Box::new(r)),
+    <l:Aexp> ">" <r:Factor> => Expr::CmpOp(Box::new(l), CmpOp::Gt, Box::new(r)),
+    <l:Aexp> "<=" <r:Factor> => Expr::CmpOp(Box::new(l), CmpOp::Le, Box::new(r)),
+    <l:Aexp> ">=" <r:Factor> => Expr::CmpOp(Box::new(l), CmpOp::Ge, Box::new(r)),
+    Aexp1,
+};
+
+Aexp1: Expr = {
+    <l:Aexp> "+" <r:Factor> => Expr::ArithOp(Box::new(l), ArithOp::Add, Box::new(r)),
+    <l:Aexp> "-" <r:Factor> => Expr::ArithOp(Box::new(l), ArithOp::Sub, Box::new(r)),
+    Factor,
+};
+
+Factor: Expr = {
+    <l:Factor> "*" <r:Term> => Expr::ArithOp(Box::new(l), ArithOp::Mul, Box::new(r)),
+    <l:Factor> "/" <r:Term> => Expr::ArithOp(Box::new(l), ArithOp::Div, Box::new(r)),
+    Term,
+};
+
+Term: Expr = {
+    Num,
+    Var,
+    Call,
+    Proj,
+};
+
+Num: Expr = {
+    r"[0-9]+" => Expr::Num(<>.parse::<i64>().unwrap()),
+};
+
+Id: String = {
+    r"[a-zA-Z_]([a-zA-Z0-9_])*" => <>.to_string(),
+}
+
+Var: Expr = {
+    <Id> => Expr::Var(<>.to_string()),
+};
+
+Args: Vec<Expr> = {
+    <e:Expr> "," <a:Args> => {
+        let mut a = a;
+        a.push(e);
+        a
+    },
+    <e:Expr> => vec![e],
+};
+
+Call: Expr = {
+    <v:Var> "(" <a:Args> ")" => Expr::Call(Box::new(v), a),
+    <v:Var> "(" ")" => Expr::Call(Box::new(v), vec![]),
+};
+
+Proj: Expr = {
+    <v:Var> "." <p:Id> => Expr::Proj(Box::new(v), p),
+};
+
+Tuple: Expr = {
+    "(" <a:Args> ")" => Expr::Tuple(a),
+};
+
+ObjectAttrs: Vec<(String, Expr)> = {
+    <v:Id> ":" <e:Expr> "," <o:ObjectAttrs> => {
+        let mut o = o;
+        o.push((v, e));
+        o
+    },
+    <v:Id> ":" <e:Expr> => vec![(v, e)],
+};
+
+Object: Expr = {
+    "{" <o:ObjectAttrs> "}" => Expr::Object(o),
+};
+
+IfElse: Expr = {
+    "if" <c:Aexp> "then" <t:Expr> "else" <e:Expr> => Expr::IfElse(Box::new(c), Box::new(t), Box::new(e)),
+};
+
+Assign: Expr = {
+    <v:Id> "=" <e:Expr> => Expr::Assign(v, Box::new(e)),
+};
+
+In: Expr = {
+    <e1:Assign> "in" <e2:Expr> => Expr::In(Box::new(e1), Box::new(e2)),
+};
+
+Params: Vec<String> = {
+    <i:Id> "," <p:Params> => {
+        let mut p = p;
+        p.push(i);
+        p
+    },
+    <i:Id> => vec![i],
+};
+
