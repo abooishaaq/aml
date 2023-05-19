@@ -1,5 +1,5 @@
 use crate::ast::*;
-use crate::ty::Type;
+use crate::ty::{Type, TypeClass};
 use std::collections::HashMap;
 
 type TypeEnv = HashMap<String, Type>;
@@ -39,93 +39,9 @@ fn occurs_check(tyvar: usize, ty: &Type) -> bool {
         }
         Type::Index(ty, _) => occurs_check(tyvar, ty),
         Type::TypeVar(i) => *i == tyvar,
+        _ => false,
     }
 }
-
-fn unify(ty1: &Type, ty2: &Type) -> Result<TypeSubst, Err> {
-    match (ty1, ty2) {
-        (Type::TypeVar(i1), Type::TypeVar(i2)) => {
-            if *i1 == *i2 {
-                Ok(TypeSubst::new())
-            } else {
-                Ok(vec![(*i1, ty2.clone())])
-            }
-        }
-        (Type::TypeVar(i), _) => {
-            if occurs_check(*i, ty2) {
-                Err(Err::InfiniteRecursion(ty1.clone(), ty2.clone()))
-            } else {
-                Ok(vec![(*i, ty2.clone())])
-            }
-        }
-        (_, Type::TypeVar(i)) => {
-            if occurs_check(*i, ty1) {
-                Err(Err::InfiniteRecursion(ty1.clone(), ty2.clone()))
-            } else {
-                Ok(vec![(*i, ty1.clone())])
-            }
-        }
-        (Type::Tuple(tys1), Type::Tuple(tys2)) => {
-            // right one can be pseudo type
-            if tys1.len() < tys2.len() {
-                Err(Err::Unify(ty1.clone(), ty2.clone()))
-            } else {
-                let mut subst = TypeSubst::new();
-                for (ty1, ty2) in tys1.iter().zip(tys2.iter()) {
-                    extend(&mut subst, unify(ty1, ty2)?)?;
-                }
-                Ok(subst)
-            }
-        }
-        (Type::Index(ty1, i1), Type::Index(ty2, i2)) => {
-            if i1 != i2 {
-                return Err(Err::Unify(*ty1.clone(), *ty2.clone()));
-            }
-            unify(ty1, ty2)
-        }
-        (Type::Tuple(tys), Type::Index(ty2, i2)) => {
-            if tys.len() < *i2 {
-                return Err(Err::Unify(ty1.clone(), *ty2.clone()));
-            }
-            unify(&tys[*i2], ty2)
-        }
-        (Type::Index(_, _), Type::Tuple(_)) => {
-            return unify(ty2, ty1);
-        }
-        (Type::Object(fields1), Type::Object(fields2)) => {
-            if fields1.len() != fields2.len() {
-                return Err(Err::Unify(ty1.clone(), ty2.clone()));
-            }
-            let mut subst = TypeSubst::new();
-            for ((key1, ty1), (key2, ty2)) in fields1.iter().zip(fields2.iter()) {
-                if key1 != key2 {
-                    return Err(Err::Unify(ty1.clone(), ty2.clone()));
-                }
-                extend(&mut subst, unify(ty1, ty2)?)?;
-            }
-            Ok(subst)
-        }
-        (Type::Func(arg_tys1, ret_ty1), Type::Func(arg_tys2, ret_ty2)) => {
-            if arg_tys1.len() != arg_tys2.len() {
-                return Err(Err::Unify(ty1.clone(), ty2.clone()));
-            }
-            let mut subst = TypeSubst::new();
-            for (ty1, ty2) in arg_tys1.iter().zip(arg_tys2.iter()) {
-                extend(&mut subst, unify(ty1, ty2)?)?;
-            }
-            extend(&mut subst, unify(ret_ty1, ret_ty2)?)?;
-            Ok(subst)
-        }
-        _ => {
-            if ty1 == ty2 {
-                Ok(TypeSubst::new())
-            } else {
-                Err(Err::Unify(ty1.clone(), ty2.clone()))
-            }
-        }
-    }
-}
-
 fn apply_subst(tyenv: &mut TypeEnv, subst: &TypeSubst) {
     for (_, ty) in tyenv {
         for (i, ty2) in subst {
@@ -136,11 +52,135 @@ fn apply_subst(tyenv: &mut TypeEnv, subst: &TypeSubst) {
 
 pub struct Infer {
     tyvar_count: usize,
+    tyclass_num: usize,
 }
 
 impl Infer {
     pub fn new() -> Self {
-        Infer { tyvar_count: 0 }
+        Infer {
+            tyvar_count: 0,
+            tyclass_num: 0,
+        }
+    }
+
+    fn unify(&mut self, ty1: &Type, ty2: &Type) -> Result<TypeSubst, Err> {
+        match (ty1, ty2) {
+            (Type::TypeVar(i1), Type::TypeVar(i2)) => {
+                if *i1 == *i2 {
+                    Ok(TypeSubst::new())
+                } else {
+                    Ok(vec![(*i1, ty2.clone())])
+                }
+            }
+            (Type::TypeVar(i), _) => {
+                if occurs_check(*i, ty2) {
+                    Err(Err::InfiniteRecursion(ty1.clone(), ty2.clone()))
+                } else {
+                    Ok(vec![(*i, ty2.clone())])
+                }
+            }
+            (_, Type::TypeVar(i)) => {
+                if occurs_check(*i, ty1) {
+                    Err(Err::InfiniteRecursion(ty1.clone(), ty2.clone()))
+                } else {
+                    Ok(vec![(*i, ty1.clone())])
+                }
+            }
+            (Type::Tuple(tys1), Type::Tuple(tys2)) => {
+                // right one can be pseudo type
+                if tys1.len() < tys2.len() {
+                    Err(Err::Unify(ty1.clone(), ty2.clone()))
+                } else {
+                    let mut subst = TypeSubst::new();
+                    for (ty1, ty2) in tys1.iter().zip(tys2.iter()) {
+                        extend(&mut subst, self.unify(ty1, ty2)?)?;
+                    }
+                    Ok(subst)
+                }
+            }
+            (Type::Index(ty1, i1), Type::Index(ty2, i2)) => {
+                if i1 != i2 {
+                    return Err(Err::Unify(*ty1.clone(), *ty2.clone()));
+                }
+                self.unify(ty1, ty2)
+            }
+            (Type::Tuple(tys), Type::Index(ty2, i2)) => {
+                if tys.len() < *i2 {
+                    return Err(Err::Unify(ty1.clone(), *ty2.clone()));
+                }
+                self.unify(&tys[*i2], ty2)
+            }
+            (Type::Index(_, _), Type::Tuple(_)) => {
+                return self.unify(ty2, ty1);
+            }
+            (Type::Object(fields1), Type::Object(fields2)) => {
+                if fields1.len() != fields2.len() {
+                    return Err(Err::Unify(ty1.clone(), ty2.clone()));
+                }
+                let mut subst = TypeSubst::new();
+                for ((key1, ty1), (key2, ty2)) in fields1.iter().zip(fields2.iter()) {
+                    if key1 != key2 {
+                        return Err(Err::Unify(ty1.clone(), ty2.clone()));
+                    }
+                    extend(&mut subst, self.unify(ty1, ty2)?)?;
+                }
+                Ok(subst)
+            }
+            (Type::Func(arg_tys1, ret_ty1), Type::Func(arg_tys2, ret_ty2)) => {
+                if arg_tys1.len() != arg_tys2.len() {
+                    return Err(Err::Unify(ty1.clone(), ty2.clone()));
+                }
+                let mut subst = TypeSubst::new();
+                for (ty1, ty2) in arg_tys1.iter().zip(arg_tys2.iter()) {
+                    extend(&mut subst, self.unify(ty1, ty2)?)?;
+                }
+                extend(&mut subst, self.unify(ret_ty1, ret_ty2)?)?;
+                Ok(subst)
+            }
+            (Type::TypeClass(n1, tc1), Type::TypeClass(n2, tc2)) => {
+                if tc1 != tc2 {
+                    return Err(Err::Unify(ty1.clone(), ty2.clone()));
+                }
+                let mut subst = TypeSubst::new();
+                self.tyvar_count += 1;
+                let tyvar = Type::TypeVar(self.tyvar_count);
+                extend(&mut subst, self.unify(ty1, &tyvar)?)?;
+                extend(&mut subst, self.unify(ty2, &tyvar)?)?;
+                Ok(subst)
+            }
+            (Type::TypeClass(_, t), ty) => {
+                if t.has_instance(ty) {
+                    Ok(TypeSubst::new())
+                } else {
+                    match ty {
+                        Type::Index(tyy, _) => self.unify(tyy, ty1),
+                        Type::Tuple(tys) => {
+                            if tys.len() == 0 {
+                                return Err(Err::Unify(ty1.clone(), ty2.clone()));
+                            }
+                            self.unify(&tys[0], ty1)
+                        }
+                        Type::Object(fields) => {
+                            if fields.len() == 0 {
+                                return Err(Err::Unify(ty1.clone(), ty2.clone()));
+                            }
+                            self.unify(&fields[0].1, ty1)
+                        }
+                        _ => Err(Err::Unify(ty1.clone(), ty2.clone())),
+                    }
+                }
+            }
+            (_, Type::TypeClass(_, _)) => {
+                return self.unify(ty2, ty1);
+            }
+            (ty1, ty2) => {
+                if ty1 == ty2 {
+                    Ok(TypeSubst::new())
+                } else {
+                    Err(Err::Unify(ty1.clone(), ty2.clone()))
+                }
+            }
+        }
     }
 
     fn type_infer_expr(
@@ -180,27 +220,41 @@ impl Infer {
             }
             Expr::IfElse(cond, then, else_) => {
                 let (cond_ty, mut subst) = self.type_infer_expr(cond, tyenv)?;
-                extend(&mut subst, unify(&cond_ty, &Type::Bool)?)?;
+                extend(&mut subst, self.unify(&cond_ty, &Type::Bool)?)?;
                 let (then_ty, subst2) = self.type_infer_expr(then, tyenv)?;
                 extend(&mut subst, subst2)?;
                 let (else_ty, subst2) = self.type_infer_expr(else_, tyenv)?;
                 extend(&mut subst, subst2)?;
-                extend(&mut subst, unify(&then_ty, &else_ty)?)?;
+                extend(&mut subst, self.unify(&then_ty, &else_ty)?)?;
                 Ok((then_ty, subst))
             }
             Expr::ArithOp(ex1, _, ex2) => {
                 let (ty1, mut subst) = self.type_infer_expr(ex1, tyenv)?;
                 let (ty2, subst2) = self.type_infer_expr(ex2, tyenv)?;
                 extend(&mut subst, subst2)?;
-                extend(&mut subst, unify(&ty1, &Type::Int)?)?;
-                extend(&mut subst, unify(&ty2, &Type::Int)?)?;
+                extend(&mut subst, self.unify(&ty1, &Type::Int)?)?;
+                extend(&mut subst, self.unify(&ty2, &Type::Int)?)?;
                 Ok((Type::Int, subst))
             }
-            Expr::CmpOp(ex1, _, ex2) => {
+            Expr::CmpOp(ex1, op, ex2) => {
                 let (ty1, mut subst) = self.type_infer_expr(ex1, tyenv)?;
                 let (ty2, subst2) = self.type_infer_expr(ex2, tyenv)?;
                 extend(&mut subst, subst2)?;
-                extend(&mut subst, unify(&ty1, &ty2)?)?;
+                extend(&mut subst, self.unify(&ty1, &ty2)?)?;
+                match op {
+                    CmpOp::Eq | CmpOp::Ne => {
+                        // ty1 and ty2 should be Eq's instance
+                        let tyclass = Type::TypeClass(self.tyclass_num, TypeClass::Eq);
+                        extend(&mut subst, self.unify(&ty1, &tyclass)?)?;
+                        extend(&mut subst, self.unify(&ty2, &tyclass)?)?;
+                    }
+                    _ => {
+                        // ty1 and ty2 should be Ord's instance
+                        let tyclass = Type::TypeClass(self.tyclass_num, TypeClass::Ord);
+                        extend(&mut subst, self.unify(&ty1, &tyclass)?)?;
+                        extend(&mut subst, self.unify(&ty2, &tyclass)?)?;
+                    }
+                }
                 Ok((Type::Bool, subst))
             }
             Expr::Call(func, args) => {
@@ -216,7 +270,7 @@ impl Infer {
                 let ret_ty = Type::TypeVar(self.tyvar_count);
                 extend(
                     &mut subst,
-                    unify(&func_ty, &Type::Func(arg_tys, Box::new(ret_ty.clone())))?,
+                    self.unify(&func_ty, &Type::Func(arg_tys, Box::new(ret_ty.clone())))?,
                 )?;
                 Ok((ret_ty, subst))
             }
@@ -262,7 +316,10 @@ impl Infer {
                     .collect(),
                 Box::new(retty.clone()),
             );
-            extend(&mut subst, unify(&func_ty, &env.get(&func.name).unwrap())?)?;
+            extend(
+                &mut subst,
+                self.unify(&func_ty, &env.get(&func.name).unwrap())?,
+            )?;
             apply_subst(&mut env, &subst);
         }
 
