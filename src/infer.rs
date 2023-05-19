@@ -137,7 +137,7 @@ impl Infer {
                 extend(&mut subst, self.unify(ret_ty1, ret_ty2)?)?;
                 Ok(subst)
             }
-            (Type::TypeClass(n1, tc1), Type::TypeClass(n2, tc2)) => {
+            (Type::TypeClass(_, tc1), Type::TypeClass(_, tc2)) => {
                 if tc1 != tc2 {
                     return Err(Err::Unify(ty1.clone(), ty2.clone()));
                 }
