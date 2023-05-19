@@ -1,3 +1,5 @@
+use std::fmt::Display;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypeClass {
     Eq,
@@ -82,5 +84,47 @@ impl Type {
             _ => {}
         };
         changed
+    }
+}
+
+impl Display for Type {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Type::Int => write!(f, "Int"),
+            Type::Bool => write!(f, "Bool"),
+            Type::Tuple(tys) => {
+                write!(f, "(")?;
+                for (i, ty) in tys.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", ty)?;
+                }
+                write!(f, ")")
+            }
+            Type::Object(fields) => {
+                write!(f, "{{")?;
+                for (i, (name, ty)) in fields.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}: {}", name, ty)?;
+                }
+                write!(f, "}}")
+            }
+            Type::Func(arg_tys, ret_ty) => {
+                write!(f, "(")?;
+                for (i, ty) in arg_tys.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", ty)?;
+                }
+                write!(f, ") -> {}", ret_ty)
+            }
+            Type::TypeClass(_, _) => write!(f, "TypeClass"),
+            Type::TypeVar(i) => write!(f, "t{}", i),
+            Type::Index(ty, i) => write!(f, "{}[{}]", ty, i),
+        }
     }
 }

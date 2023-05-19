@@ -15,8 +15,11 @@ fn main() {
             let mut inferer = infer::Infer::new();
             let res = inferer.type_infer(&program);
             match res {
-                Ok(typed_program) => {
-                    println!("{:#?}", typed_program);
+                Ok(mut typed_program) => {
+                    typed_program.reverse();
+                    for func in typed_program {
+                        println!("{}", func);
+                    }
                 }
                 Err(e) => {
                     println!("error: {:#?}", e);
