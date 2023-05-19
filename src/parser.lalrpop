@@ -3,12 +3,17 @@ use crate::ast::{ArithOp, CmpOp, Expr, Func, Program};
 grammar;
 
 pub Program: Program = {
-    <f:Fn> ";;" <p:Program> => {
+    <f:Fn> ";;" <c:Comment?> <p:Program> => {
         let mut p = p;
         p.push(f);
         p
     },
     <f:Fn> ";;" => vec![f],
+};
+
+// starts with --
+Comment: () = {
+    r"--[^\n]*" => (),
 };
 
 Fn: Func = {
