@@ -4,7 +4,7 @@ use crate::ast::{ArithOp, CmpOp, Expr, Func, Program};
 grammar;
 
 pub Program: Program = {
-    <f:Fn> ";;" <c:Comment?> <p:Program> => {
+    <f:Fn> ";;" <c:Comment*> <p:Program> => {
         let mut p = p;
         p.push(f);
         p.reverse();
