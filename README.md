@@ -1,4 +1,4 @@
-# lazyml
+# fnc
 lazy programming langauge. just something I want to make in future.
 
 ## Features
