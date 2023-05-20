@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use crate::ast::{ArithOp, CmpOp, Expr, Func, Program};
 
 grammar;
@@ -6,6 +7,7 @@ pub Program: Program = {
     <f:Fn> ";;" <c:Comment?> <p:Program> => {
         let mut p = p;
         p.push(f);
+        p.reverse();
         p
     },
     <f:Fn> ";;" => vec![f],
@@ -47,24 +49,24 @@ Expr = {
 };
 
 Aexp : Expr = {
-    <l:Aexp> "==" <r:Factor> => Expr::CmpOp(Box::new(l), CmpOp::Eq, Box::new(r)),
-    <l:Aexp> "!=" <r:Factor> => Expr::CmpOp(Box::new(l), CmpOp::Ne, Box::new(r)),
-    <l:Aexp> "<" <r:Factor> => Expr::CmpOp(Box::new(l), CmpOp::Lt, Box::new(r)),
-    <l:Aexp> ">" <r:Factor> => Expr::CmpOp(Box::new(l), CmpOp::Gt, Box::new(r)),
-    <l:Aexp> "<=" <r:Factor> => Expr::CmpOp(Box::new(l), CmpOp::Le, Box::new(r)),
-    <l:Aexp> ">=" <r:Factor> => Expr::CmpOp(Box::new(l), CmpOp::Ge, Box::new(r)),
+    <l:Aexp> "==" <r:Factor> => Expr::CmpOp(Arc::new(l), CmpOp::Eq, Arc::new(r)),
+    <l:Aexp> "!=" <r:Factor> => Expr::CmpOp(Arc::new(l), CmpOp::Ne, Arc::new(r)),
+    <l:Aexp> "<" <r:Factor> => Expr::CmpOp(Arc::new(l), CmpOp::Lt, Arc::new(r)),
+    <l:Aexp> ">" <r:Factor> => Expr::CmpOp(Arc::new(l), CmpOp::Gt, Arc::new(r)),
+    <l:Aexp> "<=" <r:Factor> => Expr::CmpOp(Arc::new(l), CmpOp::Le, Arc::new(r)),
+    <l:Aexp> ">=" <r:Factor> => Expr::CmpOp(Arc::new(l), CmpOp::Ge, Arc::new(r)),
     Aexp1,
 };
 
 Aexp1: Expr = {
-    <l:Aexp> "+" <r:Factor> => Expr::ArithOp(Box::new(l), ArithOp::Add, Box::new(r)),
-    <l:Aexp> "-" <r:Factor> => Expr::ArithOp(Box::new(l), ArithOp::Sub, Box::new(r)),
+    <l:Aexp> "+" <r:Factor> => Expr::ArithOp(Arc::new(l), ArithOp::Add, Arc::new(r)),
+    <l:Aexp> "-" <r:Factor> => Expr::ArithOp(Arc::new(l), ArithOp::Sub, Arc::new(r)),
     Factor,
 };
 
 Factor: Expr = {
-    <l:Factor> "*" <r:Term> => Expr::ArithOp(Box::new(l), ArithOp::Mul, Box::new(r)),
-    <l:Factor> "/" <r:Term> => Expr::ArithOp(Box::new(l), ArithOp::Div, Box::new(r)),
+    <l:Factor> "*" <r:Term> => Expr::ArithOp(Arc::new(l), ArithOp::Mul, Arc::new(r)),
+    <l:Factor> "/" <r:Term> => Expr::ArithOp(Arc::new(l), ArithOp::Div, Arc::new(r)),
     Term,
 };
 
@@ -104,12 +106,16 @@ Args: Vec<Expr> = {
 };
 
 Call: Expr = {
-    <v:Var> "(" <a:Args> ")" => Expr::Call(Box::new(v), a),
-    <v:Var> "(" ")" => Expr::Call(Box::new(v), vec![]),
+    <v:Var> "(" <a:Args> ")" => {
+        a.iter().rev().fold(v, |acc, e| {
+            Expr::Call(Arc::new(acc), Arc::new(e.clone()))
+        })
+    },
+    <v:Var> "(" ")" => Expr::Call(Arc::new(v), Arc::new(Expr::Unit)),
 };
 
 Proj: Expr = {
-    <v:Var> "." <p:Id> => Expr::Proj(Box::new(v), p),
+    <v:Var> "." <p:Num> => Expr::Proj(Arc::new(v), Arc::new(p)),
 };
 
 TupleItems: Vec<Expr> = {
@@ -139,15 +145,15 @@ Object: Expr = {
 };
 
 IfElse: Expr = {
-    "if" <c:Aexp> "then" <t:Expr> "else" <e:Expr> => Expr::IfElse(Box::new(c), Box::new(t), Box::new(e)),
+    "if" <c:Aexp> "then" <t:Expr> "else" <e:Expr> => Expr::IfElse(Arc::new(c), Arc::new(t), Arc::new(e)),
 };
 
 Assign: Expr = {
-    <v:Id> "=" <e:Expr> => Expr::Assign(v, Box::new(e)),
+    <v:Id> "=" <e:Expr> => Expr::Assign(v, Arc::new(e)),
 };
 
 In: Expr = {
-    <e1:Assign> "in" <e2:Expr> => Expr::In(Box::new(e1), Box::new(e2)),
+    <e1:Assign> "in" <e2:Expr> => Expr::In(Arc::new(e1), Arc::new(e2)),
 };
 
 Params: Vec<String> = {

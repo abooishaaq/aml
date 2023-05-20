@@ -1,349 +1,449 @@
 use crate::ast::*;
-use crate::ty::{Type, TypeClass};
-use std::collections::HashMap;
+use crate::ty::{Scheme, TVar, Type};
+use std::collections::{HashMap, HashSet};
+use std::fmt::{Display, Formatter};
+use std::sync::Arc;
 
-type TypeEnv = HashMap<String, Type>;
-type TypeSubst = Vec<(usize, Type)>;
+type TypeSubst = HashMap<usize, Type>;
+
+#[derive(Debug, Clone)]
+struct Constraint {
+    ty1: Type,
+    ty2: Type,
+    ex: Vec<Arc<Expr>>,
+}
+
+impl Display for Constraint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} <--> {} in", self.ty1, self.ty2)?;
+        for ex in &self.ex {
+            write!(f, "\n\t{}", stringify_expr(ex.as_ref(), 0))?;
+        }
+        write!(f, "\n")
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Env {
+    types: HashMap<String, Scheme>,
+}
+
+impl Env {
+    fn new() -> Self {
+        Env {
+            types: HashMap::new(),
+        }
+    }
+
+    fn extend(&mut self, name: String, scheme: Scheme) {
+        self.types.insert(name, scheme);
+    }
+
+    fn lookup(&self, name: &str) -> Option<&Scheme> {
+        self.types.get(name)
+    }
+}
+
+impl Constraint {
+    fn new(ty1: Type, ty2: Type, ex: Vec<Arc<Expr>>) -> Self {
+        Constraint { ty1, ty2, ex }
+    }
+}
+
+trait Substitutable {
+    fn apply(&mut self, tysub: &TypeSubst);
+    fn ftv(&self) -> HashSet<usize>;
+}
+
+impl Substitutable for Type {
+    fn apply(&mut self, tysub: &TypeSubst) {
+        match self {
+            Type::TypeVar(i) => {
+                if let Some(ty) = tysub.get(&i.id) {
+                    *self = ty.clone();
+                } else {
+                    *self = Type::TypeVar(i.clone());
+                }
+            }
+            Type::Func(t1, t2) => {
+                t1.apply(tysub);
+                t2.apply(tysub);
+            }
+            Type::Tuple(tys) => {
+                for ty in tys {
+                    ty.apply(tysub);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn ftv(&self) -> HashSet<usize> {
+        match self {
+            Type::TypeVar(i) => {
+                let mut set = HashSet::new();
+                set.insert(i.id);
+                set
+            }
+            Type::Func(t1, t2) => t1.ftv().union(&t2.ftv()).cloned().collect(),
+            Type::Tuple(tys) => {
+                let mut set = HashSet::new();
+                for ty in tys {
+                    set.extend(ty.ftv());
+                }
+                set
+            }
+            _ => HashSet::new(),
+        }
+    }
+}
+
+impl Substitutable for Constraint {
+    fn apply(&mut self, tysub: &TypeSubst) {
+        self.ty1.apply(tysub);
+        self.ty2.apply(tysub);
+    }
+
+    fn ftv(&self) -> HashSet<usize> {
+        self.ty1.ftv().union(&self.ty2.ftv()).cloned().collect()
+    }
+}
+
+impl Substitutable for Scheme {
+    fn apply(&mut self, tysub: &TypeSubst) {
+        self.ty.apply(tysub);
+        self.tyvars.clear();
+        self.tyvars.extend(self.ty.ftv());
+    }
+
+    fn ftv(&self) -> HashSet<usize> {
+        self.ty.ftv()
+    }
+}
+
+impl Substitutable for Env {
+    fn apply(&mut self, tysub: &TypeSubst) {
+        for scheme in self.types.values_mut() {
+            scheme.apply(tysub);
+        }
+    }
+
+    fn ftv(&self) -> HashSet<usize> {
+        let mut set = HashSet::new();
+        for scheme in self.types.values() {
+            set.extend(scheme.ftv());
+        }
+        set
+    }
+}
 
 #[derive(Debug)]
 pub enum Err {
-    Unify(Type, Type),
-    InfiniteRecursion(Type, Type),
+    InfiniteRecursion(TVar, Type),
+    UnboundVariable(String),
+    UnificationMismatch(Type, Type),
 }
 
-fn subst(tysub: &mut TypeSubst, tyvar: usize, t: &Type) -> Result<bool, Err> {
-    let mut changed = false;
-    for (_, ty) in tysub.iter_mut() {
-        changed = ty.subst(tyvar, t) || changed;
-    }
-    Ok(changed)
-}
-
-fn extend(tysub: &mut TypeSubst, tysub2: TypeSubst) -> Result<(), Err> {
-    for (i, ty) in tysub2 {
-        if !subst(tysub, i, &ty)? {
-            tysub.push((i, ty));
+impl Display for Err {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), std::fmt::Error> {
+        match self {
+            Err::InfiniteRecursion(ty1, ty2) => {
+                write!(f, "Infinite recursion: {} = {}", ty1, ty2)
+            }
+            Err::UnboundVariable(name) => write!(f, "Unbound variable: {}", name),
+            Err::UnificationMismatch(ty1, ty2) => {
+                write!(f, "Unification mismatch: {} != {}", ty1, ty2)
+            }
         }
     }
-    Ok(())
 }
 
-fn occurs_check(tyvar: usize, ty: &Type) -> bool {
-    match ty {
-        Type::Int => false,
-        Type::Bool => false,
-        Type::Tuple(tys) => tys.iter().any(|ty| occurs_check(tyvar, ty)),
-        Type::Object(fields) => fields.iter().any(|(_, ty)| occurs_check(tyvar, ty)),
-        Type::Func(arg_tys, ret_ty) => {
-            arg_tys.iter().any(|ty| occurs_check(tyvar, ty)) || occurs_check(tyvar, ret_ty)
+pub struct Infer<'a> {
+    tyvar_count: usize,
+    env: &'a mut Env,
+}
+
+const TYPE_INT: Type = Type::TypeCon("int");
+const TYPE_BOOL: Type = Type::TypeCon("bool");
+const TYPE_UNIT: Type = Type::TypeCon("unit");
+
+impl<'a> Infer<'a> {
+    pub fn new(env: &'a mut Env) -> Self {
+        Infer {
+            tyvar_count: 0,
+            env,
         }
-        Type::Index(ty, _) => occurs_check(tyvar, ty),
-        Type::TypeVar(i) => *i == tyvar,
+    }
+
+    fn fresh(&mut self) -> Type {
+        let tyvar = Type::TypeVar(TVar::new(self.tyvar_count));
+        self.tyvar_count += 1;
+        tyvar
+    }
+
+    fn generalize(&self, ty: &Type, env: &Env) -> Scheme {
+        let env_ftv = env.ftv();
+        let ty_ftv = ty.ftv();
+        let ftv = ty_ftv.difference(&env_ftv).cloned().collect();
+        Scheme::new_with_vars(ftv, ty.clone())
+    }
+
+    fn normalize(&self, scheme: Scheme) -> Scheme {
+        // nub == uniq
+        let ftv = scheme.ftv();
+        let mut tvar = 0;
+        let ord = ftv.iter().map(|tv| {
+            let tv = *tv;
+            tvar += 1;
+            (tv, TVar::new(tvar - 1))
+        });
+        let mut subst = TypeSubst::new();
+        for (tv, ty) in ord {
+            subst.insert(tv, Type::TypeVar(ty));
+        }
+        let mut sch = scheme.clone();
+        sch.apply(&subst);
+        sch
+    }
+
+    fn close_over(&self, ty: &Type) -> Scheme {
+        let env = Env::new();
+        self.normalize(self.generalize(ty, &env))
+    }
+
+    fn infer(&mut self, expr: &Expr) -> Result<(Type, Vec<Constraint>), Err> {
+        match expr {
+            Expr::Num(_) => Ok((TYPE_INT, vec![])),
+            Expr::Bool(_) => Ok((TYPE_BOOL, vec![])),
+            Expr::Var(name) => {
+                let res = self
+                    .env
+                    .lookup(name)
+                    .ok_or(Err::UnboundVariable(name.to_string()));
+                match res {
+                    Ok(scheme) => Ok((scheme.ty.clone(), vec![])),
+                    Err(err) => Err(err),
+                }
+            }
+            Expr::Call(func, arg) => {
+                let (func_ty, func_c) = self.infer(func)?;
+                let (arg_ty, arg_c) = self.infer(arg)?;
+                let ret_ty = self.fresh();
+                let (c, ret) = if arg_ty == TYPE_UNIT {
+                    (vec![], func_ty)
+                } else {
+                    (
+                        vec![Constraint::new(
+                            func_ty.clone(),
+                            Type::Func(Box::new(arg_ty), Box::new(ret_ty.clone())),
+                            vec![func.clone()],
+                        )],
+                        ret_ty,
+                    )
+                };
+                Ok((ret, c.into_iter().chain(func_c).chain(arg_c).collect()))
+            }
+            Expr::ArithOp(e1, _, e2) => {
+                let (ty1, c1) = self.infer(e1)?;
+                let (ty2, c2) = self.infer(e2)?;
+                let cs = vec![
+                    Constraint::new(ty1, TYPE_INT, vec![e1.clone()]),
+                    Constraint::new(ty2, TYPE_INT, vec![e2.clone()]),
+                ];
+                Ok((TYPE_INT, cs.into_iter().chain(c1).chain(c2).collect()))
+            }
+            Expr::CmpOp(e1, _, e2) => {
+                let (ty1, c1) = self.infer(e1)?;
+                let (ty2, c2) = self.infer(e2)?;
+                let cs = vec![Constraint::new(ty1, ty2, vec![e1.clone(), e2.clone()])];
+                Ok((TYPE_BOOL, cs.into_iter().chain(c1).chain(c2).collect()))
+            }
+            Expr::Assign(name, e) => {
+                let (ty, c) = self.infer(e)?;
+                self.env.extend(name.clone(), self.close_over(&ty));
+                Ok((TYPE_UNIT, c))
+            }
+            Expr::In(e1, e2) => {
+                let (_, c1) = self.infer(e1)?;
+                let (ty2, c2) = self.infer(e2)?;
+                Ok((ty2, c1.into_iter().chain(c2).collect()))
+            }
+            Expr::IfElse(cond, tr, fl) => {
+                let (ty1, c1) = self.infer(cond)?;
+                let (ty2, c2) = self.infer(tr)?;
+                let (ty3, c3) = self.infer(fl)?;
+                let mut cs = vec![
+                    Constraint::new(ty1, TYPE_BOOL, vec![cond.clone()]),
+                    Constraint::new(ty2.clone(), ty3, vec![tr.clone(), fl.clone()]),
+                ];
+                cs.extend(c1);
+                cs.extend(c2);
+                cs.extend(c3);
+                Ok((ty2, cs))
+            }
+            Expr::Tuple(exs) => {
+                let mut cs = vec![];
+                let mut tys = vec![];
+                for ex in exs {
+                    let (ty, c) = self.infer(ex)?;
+                    tys.push(ty);
+                    cs.extend(c);
+                }
+                let ty = Type::Tuple(tys);
+                Ok((ty, cs))
+            }
+            Expr::Proj(ex, idx) => {
+                let (ty, mut c) = self.infer(ex)?;
+                let i = if let Expr::Num(n) = **idx {
+                    n
+                } else {
+                    panic!("index must be number");
+                };
+                let tv = (0..i).map(|_| self.fresh()).collect::<Vec<_>>();
+                let tv2 = self.fresh();
+                let cs = vec![
+                    Constraint::new(ty, Type::Tuple(tv.clone()), vec![ex.clone()]),
+                    Constraint::new(tv2.clone(), tv[(i - 1) as usize].clone(), vec![ex.clone()]),
+                ];
+                c.extend(cs);
+                Ok((tv2, c))
+            }
+            Expr::Unit => Ok((TYPE_UNIT, vec![])),
+            _ => unimplemented!(),
+        }
+    }
+
+    fn infer_func(&mut self, func: &Func) -> Result<Scheme, Err> {
+        let fresh_vars = (0..func.args.len())
+            .map(|_| self.fresh())
+            .collect::<Vec<_>>();
+        let retty = self.fresh();
+        let mut fn_ty = fresh_vars.iter().rev().fold(retty.clone(), |acc, ty| {
+            Type::Func(Box::new(ty.clone()), Box::new(acc))
+        });
+        self.env
+            .extend(func.name.clone(), Scheme::new(fn_ty.clone()));
+        for (arg, ty) in func.args.iter().rev().zip(fresh_vars.iter()) {
+            self.env.extend(arg.clone(), Scheme::new(ty.clone()));
+        }
+        let (body_ty, mut cs) = self.infer(&func.body)?;
+        cs.push(Constraint::new(
+            body_ty,
+            retty,
+            vec![Arc::new(func.body.clone())],
+        ));
+        let unifier: Unifier = (TypeSubst::new(), cs);
+        let subst = solver(unifier)?;
+        fn_ty.apply(&subst);
+        Ok(self.close_over(&fn_ty))
+    }
+}
+
+type Unifier = (TypeSubst, Vec<Constraint>);
+
+fn unify(t1: &Type, t2: &Type) -> Result<Unifier, Err> {
+    match (t1, t2) {
+        (Type::TypeVar(v1), Type::TypeVar(v2)) if v1 == v2 => Ok((TypeSubst::new(), vec![])),
+        (Type::TypeVar(v1), t2) => {
+            if occurs_check(v1, t2) {
+                Err(Err::InfiniteRecursion(v1.clone(), t2.clone()))
+            } else {
+                bind(v1, t2)
+            }
+        }
+        (t1, Type::TypeVar(v2)) => {
+            if occurs_check(v2, t1) {
+                Err(Err::InfiniteRecursion(v2.clone(), t1.clone()))
+            } else {
+                bind(v2, t1)
+            }
+        }
+        (Type::Func(t11, t12), Type::Func(t21, t22)) => {
+            let (s1, c1) = unify(t11, t21)?;
+            let (s2, c2) = unify(t12, t22)?;
+            let mut subst = s1;
+            subst.extend(s2);
+            Ok((subst, c1.into_iter().chain(c2).collect()))
+        }
+        (Type::Tuple(ts1), Type::Tuple(ts2)) => {
+            if ts1.len() != ts2.len() {
+                Err(Err::UnificationMismatch(t1.clone(), t2.clone()))
+            } else {
+                let mut subst = TypeSubst::new();
+                let mut cs = vec![];
+                for (t1, t2) in ts1.iter().zip(ts2.iter()) {
+                    let (s, c) = unify(t1, t2)?;
+                    subst.extend(s);
+                    cs.extend(c);
+                }
+                Ok((subst, cs))
+            }
+        }
+        (Type::TypeCon(tc1), Type::TypeCon(tc2)) => {
+            if tc1 == tc2 {
+                Ok((TypeSubst::new(), vec![]))
+            } else {
+                Err(Err::UnificationMismatch(t1.clone(), t2.clone()))
+            }
+        }
+        (t1, t2) => Err(Err::UnificationMismatch(t1.clone(), t2.clone())),
+    }
+}
+
+fn occurs_check(a: &TVar, t: &Type) -> bool {
+    match t {
+        Type::TypeVar(v) => a == v,
+        Type::Func(t1, t2) => occurs_check(a, t1) || occurs_check(a, t2),
+        Type::Tuple(ts) => ts.iter().any(|t| occurs_check(a, t)),
         _ => false,
     }
 }
-fn apply_subst(tyenv: &mut TypeEnv, subst: &TypeSubst) {
-    for (_, ty) in tyenv {
-        for (i, ty2) in subst {
-            ty.subst(*i, ty2);
-        }
+
+fn bind(a: &TVar, t: &Type) -> Result<Unifier, Err> {
+    if t == &Type::TypeVar(a.clone()) {
+        Ok((TypeSubst::new(), vec![]))
+    } else if occurs_check(a, t) {
+        Err(Err::InfiniteRecursion(a.clone(), t.clone()))
+    } else {
+        let mut subst = TypeSubst::new();
+        let TVar { id: a } = a;
+        subst.insert(*a, t.clone());
+        Ok((subst, vec![]))
     }
 }
 
-pub struct Infer {
-    tyvar_count: usize,
-    tyclass_num: usize,
+fn compose(subst: &mut TypeSubst, subst2: &TypeSubst) {
+    for (_, ty) in subst {
+        ty.apply(subst2);
+    }
 }
 
-impl Infer {
-    pub fn new() -> Self {
-        Infer {
-            tyvar_count: 0,
-            tyclass_num: 0,
+fn solver(unifier: Unifier) -> Result<TypeSubst, Err> {
+    let (mut subst, mut constraints) = unifier;
+    while let Some(Constraint { ty1, ty2, ex: _ }) = constraints.pop() {
+        let (s, c) = unify(&ty1, &ty2)?;
+        constraints.extend(c);
+        for c in constraints.iter_mut() {
+            c.apply(&s);
         }
+        compose(&mut subst, &s);
+        subst.extend(s);
+    }
+    Ok(subst)
+}
+
+pub fn infer_top_level(prog: &Program) -> Result<HashMap<String, Scheme>, Err> {
+    let mut env = Env::new();
+
+    let mut res = HashMap::new();
+
+    for func in prog {
+        let mut lenv = env.clone();
+        let mut infer = Infer::new(&mut lenv);
+        let sch = infer.infer_func(func)?;
+        res.insert(func.name.clone(), sch.clone());
+        env.extend(func.name.clone(), sch);
     }
 
-    fn unify(&mut self, ty1: &Type, ty2: &Type) -> Result<TypeSubst, Err> {
-        match (ty1, ty2) {
-            (Type::TypeVar(i1), Type::TypeVar(i2)) => {
-                if *i1 == *i2 {
-                    Ok(TypeSubst::new())
-                } else {
-                    Ok(vec![(*i1, ty2.clone())])
-                }
-            }
-            (Type::TypeVar(i), _) => {
-                if occurs_check(*i, ty2) {
-                    Err(Err::InfiniteRecursion(ty1.clone(), ty2.clone()))
-                } else {
-                    Ok(vec![(*i, ty2.clone())])
-                }
-            }
-            (_, Type::TypeVar(i)) => {
-                if occurs_check(*i, ty1) {
-                    Err(Err::InfiniteRecursion(ty1.clone(), ty2.clone()))
-                } else {
-                    Ok(vec![(*i, ty1.clone())])
-                }
-            }
-            (Type::Tuple(tys1), Type::Tuple(tys2)) => {
-                // right one can be pseudo type
-                if tys1.len() < tys2.len() {
-                    Err(Err::Unify(ty1.clone(), ty2.clone()))
-                } else {
-                    let mut subst = TypeSubst::new();
-                    for (ty1, ty2) in tys1.iter().zip(tys2.iter()) {
-                        extend(&mut subst, self.unify(ty1, ty2)?)?;
-                    }
-                    Ok(subst)
-                }
-            }
-            (Type::Index(ty1, i1), Type::Index(ty2, i2)) => {
-                if i1 != i2 {
-                    return Err(Err::Unify(*ty1.clone(), *ty2.clone()));
-                }
-                self.unify(ty1, ty2)
-            }
-            (Type::Tuple(tys), Type::Index(ty2, i2)) => {
-                if tys.len() < *i2 {
-                    return Err(Err::Unify(ty1.clone(), *ty2.clone()));
-                }
-                self.unify(&tys[*i2], ty2)
-            }
-            (Type::Index(_, _), Type::Tuple(_)) => {
-                return self.unify(ty2, ty1);
-            }
-            (Type::Object(fields1), Type::Object(fields2)) => {
-                if fields1.len() != fields2.len() {
-                    return Err(Err::Unify(ty1.clone(), ty2.clone()));
-                }
-                let mut subst = TypeSubst::new();
-                for ((key1, ty1), (key2, ty2)) in fields1.iter().zip(fields2.iter()) {
-                    if key1 != key2 {
-                        return Err(Err::Unify(ty1.clone(), ty2.clone()));
-                    }
-                    extend(&mut subst, self.unify(ty1, ty2)?)?;
-                }
-                Ok(subst)
-            }
-            (Type::Func(arg_tys1, ret_ty1), Type::Func(arg_tys2, ret_ty2)) => {
-                if arg_tys1.len() != arg_tys2.len() {
-                    return Err(Err::Unify(ty1.clone(), ty2.clone()));
-                }
-                let mut subst = TypeSubst::new();
-                for (ty1, ty2) in arg_tys1.iter().zip(arg_tys2.iter()) {
-                    extend(&mut subst, self.unify(ty1, ty2)?)?;
-                }
-                extend(&mut subst, self.unify(ret_ty1, ret_ty2)?)?;
-                Ok(subst)
-            }
-            (Type::TypeClass(_, tc1), Type::TypeClass(_, tc2)) => {
-                if tc1 != tc2 {
-                    return Err(Err::Unify(ty1.clone(), ty2.clone()));
-                }
-                let mut subst = TypeSubst::new();
-                self.tyvar_count += 1;
-                let tyvar = Type::TypeVar(self.tyvar_count);
-                extend(&mut subst, self.unify(ty1, &tyvar)?)?;
-                extend(&mut subst, self.unify(ty2, &tyvar)?)?;
-                Ok(subst)
-            }
-            (Type::TypeClass(_, t), ty) => {
-                if t.has_instance(ty) {
-                    Ok(TypeSubst::new())
-                } else {
-                    match ty {
-                        Type::Index(tyy, _) => self.unify(tyy, ty1),
-                        Type::Tuple(tys) => {
-                            if tys.len() == 0 {
-                                return Err(Err::Unify(ty1.clone(), ty2.clone()));
-                            }
-                            self.unify(&tys[0], ty1)
-                        }
-                        Type::Object(fields) => {
-                            if fields.len() == 0 {
-                                return Err(Err::Unify(ty1.clone(), ty2.clone()));
-                            }
-                            self.unify(&fields[0].1, ty1)
-                        }
-                        _ => Err(Err::Unify(ty1.clone(), ty2.clone())),
-                    }
-                }
-            }
-            (_, Type::TypeClass(_, _)) => {
-                return self.unify(ty2, ty1);
-            }
-            (ty1, ty2) => {
-                if ty1 == ty2 {
-                    Ok(TypeSubst::new())
-                } else {
-                    Err(Err::Unify(ty1.clone(), ty2.clone()))
-                }
-            }
-        }
-    }
-
-    fn type_infer_expr(
-        &mut self,
-        expr: &Expr,
-        tyenv: &mut TypeEnv,
-    ) -> Result<(Type, TypeSubst), Err> {
-        match expr {
-            Expr::Num(_) => Ok((Type::Int, TypeSubst::new())),
-            Expr::Bool(_) => Ok((Type::Bool, TypeSubst::new())),
-            Expr::Var(name) => {
-                let ty = tyenv.get(name).unwrap();
-                if let Type::TypeVar(i) = ty {
-                    Ok((ty.clone(), vec![(*i, Type::TypeVar(*i))]))
-                } else {
-                    Ok((ty.clone(), TypeSubst::new()))
-                }
-            }
-            Expr::Tuple(exprs) => {
-                let mut tys = Vec::new();
-                let mut subst = TypeSubst::new();
-                for expr in exprs {
-                    let (ty, s) = self.type_infer_expr(expr, tyenv)?;
-                    tys.push(ty);
-                    extend(&mut subst, s)?;
-                }
-                Ok((Type::Tuple(tys), subst))
-            }
-            Expr::Object(fields) => {
-                let mut tys = Vec::new();
-                let mut subst = TypeSubst::new();
-                for (key, value) in fields {
-                    let (ty, s) = self.type_infer_expr(value, tyenv)?;
-                    tys.push((key.clone(), ty));
-                    extend(&mut subst, s)?;
-                }
-                Ok((Type::Object(tys), subst))
-            }
-            Expr::IfElse(cond, then, else_) => {
-                let (cond_ty, mut subst) = self.type_infer_expr(cond, tyenv)?;
-                extend(&mut subst, self.unify(&cond_ty, &Type::Bool)?)?;
-                let (then_ty, subst2) = self.type_infer_expr(then, tyenv)?;
-                extend(&mut subst, subst2)?;
-                let (else_ty, subst2) = self.type_infer_expr(else_, tyenv)?;
-                extend(&mut subst, subst2)?;
-                extend(&mut subst, self.unify(&then_ty, &else_ty)?)?;
-                Ok((then_ty, subst))
-            }
-            Expr::ArithOp(ex1, _, ex2) => {
-                let (ty1, mut subst) = self.type_infer_expr(ex1, tyenv)?;
-                let (ty2, subst2) = self.type_infer_expr(ex2, tyenv)?;
-                extend(&mut subst, subst2)?;
-                extend(&mut subst, self.unify(&ty1, &Type::Int)?)?;
-                extend(&mut subst, self.unify(&ty2, &Type::Int)?)?;
-                Ok((Type::Int, subst))
-            }
-            Expr::CmpOp(ex1, op, ex2) => {
-                let (ty1, mut subst) = self.type_infer_expr(ex1, tyenv)?;
-                let (ty2, subst2) = self.type_infer_expr(ex2, tyenv)?;
-                extend(&mut subst, subst2)?;
-                extend(&mut subst, self.unify(&ty1, &ty2)?)?;
-                match op {
-                    CmpOp::Eq | CmpOp::Ne => {
-                        // ty1 and ty2 should be Eq's instance
-                        let tyclass = Type::TypeClass(self.tyclass_num, TypeClass::Eq);
-                        extend(&mut subst, self.unify(&ty1, &tyclass)?)?;
-                        extend(&mut subst, self.unify(&ty2, &tyclass)?)?;
-                    }
-                    _ => {
-                        // ty1 and ty2 should be Ord's instance
-                        let tyclass = Type::TypeClass(self.tyclass_num, TypeClass::Ord);
-                        extend(&mut subst, self.unify(&ty1, &tyclass)?)?;
-                        extend(&mut subst, self.unify(&ty2, &tyclass)?)?;
-                    }
-                }
-                Ok((Type::Bool, subst))
-            }
-            Expr::Call(func, args) => {
-                let (func_ty, _) = self.type_infer_expr(func, tyenv)?;
-                let mut subst = TypeSubst::new();
-                let (arg_tys, subst2): (Vec<_>, Vec<_>) = args
-                    .iter()
-                    .map(|arg| self.type_infer_expr(arg, tyenv))
-                    .collect::<Result<Vec<_>, _>>()?
-                    .into_iter()
-                    .unzip();
-                extend(&mut subst, subst2.into_iter().flatten().collect())?;
-                self.tyvar_count += 1;
-                let ret_ty = Type::TypeVar(self.tyvar_count);
-                extend(
-                    &mut subst,
-                    self.unify(&func_ty, &Type::Func(arg_tys, Box::new(ret_ty.clone())))?,
-                )?;
-                Ok((ret_ty, subst))
-            }
-            Expr::Assign(name, ex) => {
-                let (ty, subst) = self.type_infer_expr(ex, tyenv)?;
-                tyenv.insert(name.clone(), ty.clone());
-                Ok((ty, subst)) // ignore subst
-            }
-            Expr::Proj(v, ex) => {
-                let (ty, subst) = self.type_infer_expr(v, tyenv)?;
-                let idx = ex[1..].parse::<usize>().unwrap();
-                self.tyvar_count += 1;
-                let temp = Type::Index(Box::new(ty), idx);
-                Ok((temp, subst))
-            }
-            Expr::In(asgn, ex) => {
-                let (_, mut subst) = self.type_infer_expr(asgn, tyenv)?;
-                let (ty2, subst2) = self.type_infer_expr(ex, tyenv)?;
-                extend(&mut subst, subst2)?;
-                Ok((ty2, subst))
-            }
-        }
-    }
-
-    pub fn type_infer(&mut self, program: &Program) -> Result<TypedProgram, Err> {
-        let mut env = TypeEnv::new();
-
-        for func in program {
-            self.tyvar_count += 1;
-            env.insert(func.name.clone(), Type::TypeVar(self.tyvar_count));
-        }
-
-        for func in program {
-            for (_, arg) in func.args.iter().enumerate() {
-                self.tyvar_count += 1;
-                env.insert(arg.clone(), Type::TypeVar(self.tyvar_count));
-            }
-            let (retty, mut subst) = self.type_infer_expr(&func.body, &mut env)?;
-            let func_ty = Type::Func(
-                func.args
-                    .iter()
-                    .map(|arg| env.get(arg).unwrap().clone())
-                    .collect(),
-                Box::new(retty.clone()),
-            );
-            extend(
-                &mut subst,
-                self.unify(&func_ty, &env.get(&func.name).unwrap())?,
-            )?;
-            apply_subst(&mut env, &subst);
-        }
-
-        let typed_program = program
-            .iter()
-            .map(|func| {
-                let retty = match env.get(&func.name).unwrap().clone() {
-                    Type::Func(_, retty) => *retty,
-                    _ => unreachable!(),
-                };
-                Ok(TypedFunc {
-                    name: func.name.clone(),
-                    args: func
-                        .args
-                        .iter()
-                        .map(|arg| (arg.clone(), env.get(arg).unwrap().clone()))
-                        .collect::<Vec<_>>(),
-                    body: (func.body.clone(), retty),
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        Ok(typed_program)
-    }
+    Ok(res)
 }

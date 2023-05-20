@@ -11,18 +11,20 @@ fn main() {
     let input = std::fs::read_to_string(filename).expect("cannot read file");
     let res = parser::ProgramParser::new().parse(&input);
     match res {
-        Ok(program) => {
-            let mut inferer = infer::Infer::new();
-            let res = inferer.type_infer(&program);
-            match res {
-                Ok(mut typed_program) => {
-                    typed_program.reverse();
-                    for func in typed_program {
-                        println!("{}", func);
+        Ok(mut program) => {
+            program.reverse();
+            for func in &program {
+                println!("{}\n", func);
+            }
+            let tys = infer::infer_top_level(&program);
+            match tys {
+                Ok(tys) => {
+                    for (name, ty) in tys {
+                        println!("{}: {}", name, ty);
                     }
                 }
                 Err(e) => {
-                    println!("error: {:#?}", e);
+                    println!("error: {}", e);
                     std::process::exit(1);
                 }
             }

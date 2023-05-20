@@ -1,5 +1,6 @@
 use crate::ty::Type;
 use core::fmt::Display;
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub enum ArithOp {
@@ -24,15 +25,16 @@ pub enum Expr {
     Num(i64),
     Bool(bool),
     Var(String),
-    Call(Box<Expr>, Vec<Expr>),
-    Proj(Box<Expr>, String),
+    Call(Arc<Expr>, Arc<Expr>),
+    Proj(Arc<Expr>, Arc<Expr>),
     Tuple(Vec<Expr>),
     Object(Vec<(String, Expr)>),
-    IfElse(Box<Expr>, Box<Expr>, Box<Expr>),
-    ArithOp(Box<Expr>, ArithOp, Box<Expr>),
-    CmpOp(Box<Expr>, CmpOp, Box<Expr>),
-    Assign(String, Box<Expr>),
-    In(Box<Expr>, Box<Expr>),
+    IfElse(Arc<Expr>, Arc<Expr>, Arc<Expr>),
+    ArithOp(Arc<Expr>, ArithOp, Arc<Expr>),
+    CmpOp(Arc<Expr>, CmpOp, Arc<Expr>),
+    Assign(String, Arc<Expr>),
+    In(Arc<Expr>, Arc<Expr>),
+    Unit,
 }
 
 pub type TypedExpr = (Expr, Type);
@@ -52,8 +54,6 @@ pub struct TypedFunc {
     pub args: Vec<(String, Type)>,
     pub body: TypedExpr,
 }
-
-pub type TypedProgram = Vec<TypedFunc>;
 
 impl Display for CmpOp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -79,23 +79,15 @@ impl Display for ArithOp {
     }
 }
 
-fn stringify_expr(expr: &Expr, indent: usize) -> String {
+pub fn stringify_expr(expr: &Expr, indent: usize) -> String {
     match expr {
         Expr::Num(n) => format!("{}", n),
         Expr::Bool(b) => format!("{}", b),
         Expr::Var(x) => x.clone(),
         Expr::Call(e, es) => {
-            let mut s = format!("{}(", stringify_expr(e, 0));
-            for (i, e) in es.iter().enumerate() {
-                if i > 0 {
-                    s += ", ";
-                }
-                s += &stringify_expr(e, 0);
-            }
-            s += ")";
-            s
+            format!("{} {}", stringify_expr(e, 0), stringify_expr(&es, 0))
         }
-        Expr::Proj(e, x) => format!("{}.{}", stringify_expr(e, 0), x),
+        Expr::Proj(e, x) => format!("{}.{}", stringify_expr(e, 0), stringify_expr(x, 0)),
         Expr::Tuple(es) => {
             let mut s = format!("(");
             for (i, e) in es.iter().enumerate() {
@@ -154,20 +146,14 @@ fn stringify_expr(expr: &Expr, indent: usize) -> String {
                 stringify_expr(e2, indent + 4)
             )
         }
+        Expr::Unit => "()".to_string(),
     }
 }
 
-impl Display for TypedFunc {
+impl Display for Func {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let args_ty = self
-            .args
-            .iter()
-            .map(|(x, ty)| format!("{}: {}", x, ty))
-            .collect::<Vec<_>>()
-            .join(", ");
-        write!(f, "-- ({}) -> {}\n", args_ty, self.body.1)?;
         write!(f, "{}(", self.name)?;
-        for (i, (x, _)) in self.args.iter().enumerate() {
+        for (i, x) in self.args.iter().enumerate() {
             if i > 0 {
                 write!(f, ", ")?;
             }
@@ -177,7 +163,7 @@ impl Display for TypedFunc {
             f,
             ") ->\n{}{}\n{}",
             " ".repeat(4),
-            stringify_expr(&self.body.0, 4),
+            stringify_expr(&self.body, 4),
             ";;\n"
         )
     }
