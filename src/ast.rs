@@ -22,6 +22,7 @@ pub enum CmpOp {
 #[derive(Debug, Clone)]
 pub enum Expr {
     Num(i64),
+    Bool(bool),
     Var(String),
     Call(Box<Expr>, Vec<Expr>),
     Proj(Box<Expr>, String),
@@ -81,6 +82,7 @@ impl Display for ArithOp {
 fn stringify_expr(expr: &Expr, indent: usize) -> String {
     match expr {
         Expr::Num(n) => format!("{}", n),
+        Expr::Bool(b) => format!("{}", b),
         Expr::Var(x) => x.clone(),
         Expr::Call(e, es) => {
             let mut s = format!("{}(", stringify_expr(e, 0));

@@ -190,6 +190,7 @@ impl Infer {
     ) -> Result<(Type, TypeSubst), Err> {
         match expr {
             Expr::Num(_) => Ok((Type::Int, TypeSubst::new())),
+            Expr::Bool(_) => Ok((Type::Bool, TypeSubst::new())),
             Expr::Var(name) => {
                 let ty = tyenv.get(name).unwrap();
                 if let Type::TypeVar(i) = ty {
@@ -258,7 +259,8 @@ impl Infer {
                 Ok((Type::Bool, subst))
             }
             Expr::Call(func, args) => {
-                let (func_ty, mut subst) = self.type_infer_expr(func, tyenv)?;
+                let (func_ty, _) = self.type_infer_expr(func, tyenv)?;
+                let mut subst = TypeSubst::new();
                 let (arg_tys, subst2): (Vec<_>, Vec<_>) = args
                     .iter()
                     .map(|arg| self.type_infer_expr(arg, tyenv))

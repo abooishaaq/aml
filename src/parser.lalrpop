@@ -73,10 +73,16 @@ Term: Expr = {
     Var,
     Call,
     Proj,
+    Bool,
 };
 
 Num: Expr = {
     r"[0-9]+" => Expr::Num(<>.parse::<i64>().unwrap()),
+};
+
+Bool: Expr = {
+    "true" => Expr::Bool(true),
+    "false" => Expr::Bool(false),
 };
 
 Id: String = {
