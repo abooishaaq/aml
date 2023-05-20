@@ -74,6 +74,7 @@ Term: Expr = {
     Call,
     Proj,
     Bool,
+    "(" <e:Aexp> ")" => e,
 };
 
 Num: Expr = {
@@ -111,8 +112,17 @@ Proj: Expr = {
     <v:Var> "." <p:Id> => Expr::Proj(Box::new(v), p),
 };
 
+TupleItems: Vec<Expr> = {
+    <e:Expr> "," <a:TupleItems> => {
+        let mut a = a;
+        a.push(e);
+        a
+    },
+    <e:Expr> "," => vec![e],
+};
+
 Tuple: Expr = {
-    "(" <a:Args> ")" => Expr::Tuple(a),
+    "(" <a:TupleItems> ")" => Expr::Tuple(a),
 };
 
 ObjectAttrs: Vec<(String, Expr)> = {
